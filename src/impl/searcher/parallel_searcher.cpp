@@ -24,6 +24,7 @@
 
 #include "datacell/flatten_interface.h"
 #include "impl/heap/standard_heap.h"
+#include "impl/reasoning/search_reasoning.h"
 #include "utils/filter_search_skip_strategy.h"
 #include "utils/spsc_queue.h"
 
@@ -148,7 +149,8 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
     std::vector<Vector<InnerIdType>> neighbors(beam,
                                                Vector<InnerIdType>(graph->MaximumDegree(), alloc));
     Vector<float> line_dists(vector_size, alloc);
-    Vector<float> lower_bound_dists(vector_size, alloc);
+    Vector<float> lower_bound_dists(
+        inner_search_param.enable_rabitq_one_bit_search ? vector_size : 0, alloc);
     Vector<std::pair<float, uint64_t>> node_pair(beam, alloc);
     auto skip_strategy = create_filter_search_skip_strategy(
         inner_search_param.skip_strategy_type,
@@ -176,9 +178,15 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
     } else {
         flatten->Query(&dist, computer, &ep, 1, ctx);
     }
+    auto* reasoning = ctx == nullptr ? nullptr : ctx->reasoning_ctx;
+    if (reasoning != nullptr) {
+        reasoning->RecordVisit(ep, dist, 0);
+    }
     if (check_func(ep)) {
         top_candidates->Push(dist, ep);
         lower_bound = top_candidates->Top().first;
+    } else if (reasoning != nullptr) {
+        reasoning->RecordFilterReject(ep);
     }
     if constexpr (mode == InnerSearchMode::RANGE_SEARCH) {
         if (dist > inner_search_param.radius and not top_candidates->Empty()) {

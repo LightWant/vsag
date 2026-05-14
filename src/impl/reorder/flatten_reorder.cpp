@@ -125,43 +125,19 @@ FlattenReorder::Reorder(const vsag::DistHeapPtr& input,
     auto has_valid_lower_bound = [](float lower_bound) {
         return std::isfinite(lower_bound) and lower_bound < std::numeric_limits<float>::max();
     };
-    bool lower_bounds_available = true;
-    for (uint64_t i = 0; i < candidate_size; ++i) {
-        if (not has_valid_lower_bound(lower_bounds[i])) {
-            lower_bounds_available = false;
-            break;
-        }
-    }
-
-    if (not lower_bounds_available) {
-        flatten_->Query(
-            lower_bound_probe_dists.data(), computer, all_ids.data(), candidate_size, &ctx);
-        for (uint64_t i = 0; i < candidate_size; ++i) {
-            if (ctx.reasoning_ctx != nullptr) {
-                ctx.reasoning_ctx->RecordReorder(
-                    all_ids[i], lower_bounds[i], lower_bound_probe_dists[i]);
-            }
-            if (reorder_heap->Size() < topk or
-                lower_bound_probe_dists[i] < reorder_heap->Top().first) {
-                reorder_heap->Push(lower_bound_probe_dists[i], all_ids[i]);
-                if (reorder_heap->Size() > topk) {
-                    if (iter_ctx != nullptr) {
-                        auto curr = reorder_heap->Top();
-                        iter_ctx->AddDiscardNode(curr.first, curr.second);
-                    }
-                    if (ctx.reasoning_ctx != nullptr) {
-                        ctx.reasoning_ctx->RecordReorderEviction(reorder_heap->Top().second, 0);
-                    }
-                    reorder_heap->Pop();
-                }
-            }
-        }
-        return reorder_heap;
-    }
 
     Vector<uint64_t> order(candidate_size, query_allocator);
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&lower_bounds](uint64_t lhs, uint64_t rhs) {
+    std::sort(order.begin(), order.end(), [&lower_bounds, &has_valid_lower_bound](uint64_t lhs,
+                                                                                   uint64_t rhs) {
+        const bool lhs_valid = has_valid_lower_bound(lower_bounds[lhs]);
+        const bool rhs_valid = has_valid_lower_bound(lower_bounds[rhs]);
+        if (lhs_valid != rhs_valid) {
+            return not lhs_valid;
+        }
+        if (not lhs_valid) {
+            return lhs < rhs;
+        }
         return lower_bounds[lhs] < lower_bounds[rhs];
     });
 
@@ -187,6 +163,7 @@ FlattenReorder::Reorder(const vsag::DistHeapPtr& input,
     uint64_t cursor = bootstrap_size;
     while (cursor < candidate_size) {
         if (reorder_heap->Size() == topk &&
+            has_valid_lower_bound(lower_bounds[order[cursor]]) &&
             lower_bounds[order[cursor]] >= reorder_heap->Top().first) {
             break;
         }
@@ -195,7 +172,7 @@ FlattenReorder::Reorder(const vsag::DistHeapPtr& input,
         uint64_t batch_count = 0;
         while (cursor < candidate_size && batch_count < batch_size) {
             const auto idx = order[cursor];
-            if (lower_bounds[idx] >= threshold) {
+            if (has_valid_lower_bound(lower_bounds[idx]) && lower_bounds[idx] >= threshold) {
                 break;
             }
             ids[batch_count] = all_ids[idx];

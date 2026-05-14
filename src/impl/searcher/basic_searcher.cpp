@@ -191,9 +191,14 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
         } else {
             flatten->Query(&dist, computer, &ep, 1, ctx);
         }
+        if (reasoning != nullptr) {
+            reasoning->RecordVisit(ep, dist, 0);
+        }
         if (not is_id_allowed || is_id_allowed->CheckValid(ep)) {
             top_candidates->Push(dist, ep);
             lower_bound = top_candidates->Top().first;
+        } else if (reasoning != nullptr) {
+            reasoning->RecordFilterReject(ep);
         }
         candidate_set->Push(-dist, ep);
         vl->Set(ep);
@@ -369,9 +374,14 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
         flatten->Query(&dist, computer, &ep, 1, ctx);
     }
     ++dist_cmp;
+    if (reasoning != nullptr) {
+        reasoning->RecordVisit(ep, dist, 0);
+    }
     if (check_func(ep)) {
         top_candidates->Push(dist, ep);
         lower_bound = top_candidates->Top().first;
+    } else if (reasoning != nullptr) {
+        reasoning->RecordFilterReject(ep);
     }
     if constexpr (mode == InnerSearchMode::RANGE_SEARCH) {
         if (dist > inner_search_param.radius and not top_candidates->Empty()) {
