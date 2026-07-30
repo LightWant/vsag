@@ -23,7 +23,7 @@ reorder。DMQ 将每个非零 value 压缩为 8-bit code，但原有 compact ter
 - `wholenet-sparse-1m-ip` 上完整索引从 419.49 MiB 降至 401.00 MiB，
   节省 18.49 MiB，即 4.41%；
 - DMQ rerank backend 从 146.96 MiB 降至 128.47 MiB，节省 12.58%；
-- EF seek 相对 EF 标量全量扫描，Release 延迟降低 5.74%，QPS 提升 5.96%；
+- 相对 Packed，最终 EF seek 的 QPS 低 10.78%，平均延迟高 11.92%；
 - Recall 保持 0.9863；
 - 单元测试共 13 个 case、2220 个断言，全部通过。
 
@@ -223,48 +223,9 @@ $$
 - `docs/docs/zh/src/quantization/elias-fano.md`
 - `src/impl/elias_fano_stream.{h,cpp}`
 
-## 5. 解码优化演进
+## 5. 解码路径优化
 
-### 5.1 原始标量解码
-
-标量 reader 为每个 ID：
-
-1. 从 high bitmap 找到下一个 1；
-2. 计算 \(\operatorname{high}_i=p_i-i\)；
-3. 从 low bit stream 读取 \(\operatorname{low}_i\)；
-4. 重建：
-
-$$
-x_i
-=
-\operatorname{high}_i2^l+\operatorname{low}_i
-$$
-
-Packed 解码主要是 load、shift 和 mask；EF 还需要维护两条 bit stream、
-执行 trailing-zero count、跨 word refill 和位置重建。因此虽然顺序解码
-摊销复杂度为 \(O(1)\)，常数仍明显大于 packed。
-
-### 5.2 Stage A：64-bit word 优化
-
-第一阶段优化包括：
-
-- high bitmap 每次安全加载最多 8 字节；
-- 使用 64-bit buffer；
-- 使用 trailing-zero count 定位最低置位；
-- 使用 `buffer &= buffer - 1` 清除已消费置位；
-- 预计算 low mask；
-- 增加最多 8 个 ID 的 `ReadBatch`；
-- 支持标量与批量 reader 混用。
-
-在 `wholenet-sparse-1m-ip` 的干净 Release 测试中：
-
-| 指标 | Stage A 前 | Stage A 后 | 变化 |
-| --- | ---: | ---: | ---: |
-| QPS | 2802.13 | 2891.81 | +3.20% |
-| 平均延迟 | 2.854 ms | 2.760 ms | -3.30% |
-| Recall | 0.9863 | 0.9863 | 不变 |
-
-### 5.3 Layout 复用
+### 5.1 Layout 复用
 
 早期距离计算会为同一候选重复计算多次 Hybrid layout，用于：
 
@@ -399,7 +360,7 @@ EF 不编码 value，也不需要在 EF payload 中保存 value offset。
 
 ### 6.6 复杂度
 
-旧标量完整扫描为：
+完整解码候选文档 ID 的复杂度为：
 
 $$
 O(L)
@@ -486,9 +447,9 @@ word 扫描约为 \(O(L/64)\)，并且只读取目标 bucket 的 low values。
 - 严格递增序列；
 - 单调不减与重复值；
 - \(l=0\)；
-- 标量 round-trip；
+- 顺序 round-trip；
 - 完整与不完整 batch；
-- 标量和 batch 混用；
+- 单个读取和 batch 读取混用；
 - high bitmap 全零 word 跳过；
 - seek 命中和缺失；
 - 多个 query term 位于同一 high bucket；
@@ -545,8 +506,7 @@ all passed
 | search threads | 8 |
 | build type | Release |
 
-测试使用同一份 Hybrid EF 索引完成标量扫描与 seek A/B，避免构建差异影响。
-索引在测试后保留。
+Packed 与 Hybrid EF 使用相同检索参数。索引在测试后保留。
 
 ## 10. 索引大小
 
@@ -594,43 +554,7 @@ DMQ rerank backend 节省 12.58%；代价是当前历史测试中 QPS 低 10.78%
 平均延迟高 11.92%。两类性能结果来自相同参数但不是交错运行，差异仍应通过
 后续同机交错 A/B 测试复核。
 
-### 11.2 Packed 与标量 EF 的阶段分析
-
-在加入 query-driven seek 之前，对 Packed 与 Hybrid EF 标量路径进行了阶段
-计时：
-
-| 格式 | 倒排 candidate | 正排 reorder | 总延迟 |
-| --- | ---: | ---: | ---: |
-| Packed | 1.510 ms | 0.931 ms | 2.446 ms |
-| Hybrid EF 标量 | 1.504 ms | 1.364 ms | 2.890 ms |
-
-结论：
-
-- 倒排 candidate 阶段基本相同，差异属于测量波动；
-- 编码格式只影响正排 reorder；
-- 标量 EF reorder 比 Packed 慢约 46.6%；
-- 当时约 97.7% 的总延迟差来自 reorder。
-
-这说明优化重点应是 EF 集合交和 ordinal 定位，而不是倒排召回。
-
-### 11.3 EF Seek A/B
-
-同一 Release 构建方式、同一 Hybrid EF 索引、相同检索参数下：
-
-| 实现 | 轮数 | 平均延迟 | 平均 QPS |
-| --- | ---: | ---: | ---: |
-| EF 标量完整扫描 | 5 | 2.905 ms | 2750 |
-| EF query-driven seek | 10 | 2.738 ms | 2914 |
-| 变化 | — | -5.74% | +5.96% |
-
-两组 seek 分别相对标量基线取得：
-
-- 第一组：延迟降低 7.1%，QPS 提升 7.4%；
-- 第二组：延迟降低 4.4%，QPS 提升 4.5%。
-
-结果存在正常运行波动，但两组方向一致。
-
-### 11.4 Recall 与内存
+### 11.2 Recall 与内存
 
 完整质量校验结果：
 
@@ -646,11 +570,9 @@ Recall 与 seek 优化前一致。
 
 性能结果：
 
-- `/tmp/sindi_dmq_scalar_release.json`
 - `/tmp/sindi_dmq_seek_release.json`
 - `/tmp/sindi_dmq_seek_release_after.json`
 - `/tmp/sindi_dmq_seek_recall.json`
-- `/tmp/sindi_dmq_profile_hybrid_latency.json`
 - `/tmp/sindi_dmq_profile_packed_latency.json`
 
 保留索引：
@@ -662,14 +584,13 @@ Recall 与 seek 优化前一致。
 
 ### 13.1 空间与速度
 
-EF 节省 term ID 空间，但标量逐项解码常数高于 packed。Query-driven seek
-显著缩小差距，但当前结果仍不能说明 EF reorder 已达到 Packed 水平。
+EF 节省 term ID 空间，但当前 query-driven seek 的 QPS 仍低于 Packed，
+需要在空间收益与检索性能之间取舍。
 
 ### 13.2 查询分布
 
 Seek 最适合查询 term 数远小于候选文档 term 数的场景。短文档或查询非常
-稠密时，顺序扫描可能更快，后续可以根据 \(L\) 和查询 term 数自适应选择
-seek 或 scan。
+稠密时，其跳跃定位成本需要通过更多数据分布继续评估。
 
 ### 13.3 非严格随机访问
 
@@ -680,7 +601,7 @@ seek 或 scan。
 ### 13.4 SIMD
 
 当前优化使用 word-level `popcount`、trailing-zero count 和定宽 low random
-access，属于标量宽字优化。真正 SIMD 化仍需处理：
+access。进一步 SIMD 化仍需处理：
 
 - 变长 high bitmap；
 - 跨 word 边界；
@@ -702,7 +623,7 @@ Hybrid decoder 自动区分。正式合入前应通过索引版本、显式 enco
 
 建议按以下顺序继续：
 
-1. 增加 seek/scan 自适应阈值，并在不同文档长度和查询长度上测试；
+1. 在不同文档长度和查询长度上评估 seek 的适用范围；
 2. 为 Packed 路径实现同样的 query-driven lower-bound，建立公平上限；
 3. 统计每个候选的 EF/Packed 选择比例和平均 bucket occupancy；
 4. 将 high-word `popcount`、zero select 和 low 比较做手工展开；
@@ -723,10 +644,10 @@ seek 继续复用相同 Hybrid EF payload；packed-only legacy 索引兼容性�
 
 - DMQ rerank backend 节省 12.58%；
 - 完整索引节省 4.41%；
-- query-driven EF seek 相对 EF 标量扫描降低 5.74% 延迟；
-- QPS 提升 5.96%；
+- query-driven EF seek 相对 Packed 的 QPS 低 10.78%；
+- 平均延迟相对 Packed 高 11.92%；
 - Recall 保持 0.9863。
 
 EF 在该方案中的核心职责不是 value 解码，而是压缩有序 term ID 集合并返回
 集合交命中的 ordinal。DMQ 再利用 ordinal 访问平行存储的 value code。
-从完整扫描改为查询驱动 seek，是本次检索性能优化的关键。
+查询驱动 seek 直接完成 term 到 ordinal 的定位。
