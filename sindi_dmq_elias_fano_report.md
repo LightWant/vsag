@@ -577,7 +577,24 @@ Packed:    /tmp/vsag_sindi_dmq_profile_packed.index
 
 ## 11. 检索性能
 
-### 11.1 Packed 与标量 EF 的阶段分析
+### 11.1 Packed 与最终 EF Seek 总览
+
+下表汇总同一 `wholenet-sparse-1m-ip` Release 配置下的历史结果。Packed
+性能为 5 轮均值；Hybrid EF 性能为两组 seek 测试、共 10 轮的均值；Recall
+取完整质量校验结果；索引大小取保留索引文件的精确字节数。
+
+| 格式 | QPS | Recall@10 | 平均延迟 | 完整索引大小 | DMQ rerank backend |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Packed | 3266 | 0.9863 | 2.446 ms | 419.49 MiB | 146.96 MiB |
+| Hybrid EF + query-driven seek | 2914 | 0.9863 | 2.738 ms | 401.00 MiB | 128.47 MiB |
+| EF 相对 Packed | -10.78% | 不变 | +11.92% | -4.41% | -12.58% |
+
+因此，最终 EF seek 在不改变 Recall 的情况下，完整索引节省 4.41%，其中
+DMQ rerank backend 节省 12.58%；代价是当前历史测试中 QPS 低 10.78%、
+平均延迟高 11.92%。两类性能结果来自相同参数但不是交错运行，差异仍应通过
+后续同机交错 A/B 测试复核。
+
+### 11.2 Packed 与标量 EF 的阶段分析
 
 在加入 query-driven seek 之前，对 Packed 与 Hybrid EF 标量路径进行了阶段
 计时：
@@ -596,7 +613,7 @@ Packed:    /tmp/vsag_sindi_dmq_profile_packed.index
 
 这说明优化重点应是 EF 集合交和 ordinal 定位，而不是倒排召回。
 
-### 11.2 EF Seek A/B
+### 11.3 EF Seek A/B
 
 同一 Release 构建方式、同一 Hybrid EF 索引、相同检索参数下：
 
@@ -613,7 +630,7 @@ Packed:    /tmp/vsag_sindi_dmq_profile_packed.index
 
 结果存在正常运行波动，但两组方向一致。
 
-### 11.3 Recall 与内存
+### 11.4 Recall 与内存
 
 完整质量校验结果：
 
