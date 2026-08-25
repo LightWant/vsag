@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -85,6 +87,19 @@ public:
     ComputeDistImpl(Computer<TransformQuantizer<QuantTmpl, metric>>& computer,
                     const uint8_t* codes,
                     float* dists) const;
+
+    bool
+    ComputeDistWithLowerBoundImpl(
+        Computer<TransformQuantizer<QuantTmpl, metric>>& computer,
+        const uint8_t* codes,
+        float* dist,
+        float* lower_bound,
+        float runtime_rabitq_error_rate = std::numeric_limits<float>::quiet_NaN()) const;
+
+    [[nodiscard]] bool
+    SupportsDistanceLowerBoundImpl() const {
+        return quantizer_->SupportsDistanceLowerBound();
+    }
 
     void
     ScanBatchDistImpl(Computer<TransformQuantizer<QuantTmpl, metric>>& computer,
@@ -403,6 +418,35 @@ TransformQuantizer<QuantTmpl, metric>::ComputeDistImpl(Computer<TransformQuantiz
         ExecuteChainDistanceRecovery(quantize_dist, meta_offset_1, meta_offset_2, codes_1, codes_2);
 };
 
+template <typename QuantTmpl, MetricType metric>
+bool
+TransformQuantizer<QuantTmpl, metric>::ComputeDistWithLowerBoundImpl(
+    Computer<TransformQuantizer>& computer,
+    const uint8_t* codes,
+    float* dist,
+    float* lower_bound,
+    float runtime_rabitq_error_rate) const {
+    float quantized_dist = 0.0F;
+    float quantized_lower_bound = std::numeric_limits<float>::max();
+    const bool computed = quantizer_->ComputeDistWithLowerBound(*computer.inner_computer_,
+                                                                codes,
+                                                                &quantized_dist,
+                                                                &quantized_lower_bound,
+                                                                runtime_rabitq_error_rate);
+    const auto* query_codes = computer.inner_computer_->buf_;
+    *dist = ExecuteChainDistanceRecovery(
+        quantized_dist, query_meta_offsets_.data(), base_meta_offsets_.data(), query_codes, codes);
+    if (lower_bound != nullptr) {
+        *lower_bound = computed and std::isfinite(quantized_lower_bound)
+                           ? ExecuteChainDistanceRecovery(quantized_lower_bound,
+                                                          query_meta_offsets_.data(),
+                                                          base_meta_offsets_.data(),
+                                                          query_codes,
+                                                          codes)
+                           : std::numeric_limits<float>::max();
+    }
+    return computed;
+}
 template <typename QuantTmpl, MetricType metric>
 float
 TransformQuantizer<QuantTmpl, metric>::ComputeImpl(const uint8_t* codes1,

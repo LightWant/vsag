@@ -43,7 +43,8 @@ MakePyramidIndex(uint32_t index_min_size,
                  bool use_mrle_split = false,
                  bool use_mrle_fp32 = false,
                  bool use_reorder = false,
-                 bool store_raw_vector = false) {
+                 bool store_raw_vector = false,
+                 bool use_mrle_sq8 = false) {
     PyramidTestIndex result;
     vsag::IndexCommonParam common_param;
     common_param.dim_ = PYRAMID_TEST_DIM;
@@ -90,14 +91,24 @@ MakePyramidIndex(uint32_t index_min_size,
     external_param[vsag::PYRAMID_INDEX_MIN_SIZE].SetInt(index_min_size);
     external_param[vsag::PYRAMID_BUILD_THREAD_COUNT].SetUint64(build_thread_count);
     external_param[vsag::STORE_RAW_VECTOR].SetBool(store_raw_vector);
-    external_param[vsag::PYRAMID_USE_REORDER].SetBool(use_rabitq_with_sq8 or split_rabitq or
-                                                      use_mrle_split or use_reorder);
+    external_param[vsag::PYRAMID_USE_REORDER].SetBool(
+        use_rabitq_with_sq8 or split_rabitq or use_mrle_split or use_reorder or use_mrle_sq8);
     if (use_rabitq_with_sq8) {
         external_param[vsag::PYRAMID_BASE_QUANTIZATION_TYPE].SetString("rabitq");
         external_param[vsag::PYRAMID_PRECISE_QUANTIZATION_TYPE].SetString("sq8");
         external_param[vsag::PYRAMID_BASE_IO_TYPE].SetString("block_memory_io");
         external_param[vsag::PYRAMID_PRECISE_IO_TYPE].SetString("block_memory_io");
-        external_param[vsag::PYRAMID_RABITQ_BITS_PER_DIM_BASE].SetUint64(1);
+        external_param[vsag::PYRAMID_RABITQ_BITS_PER_DIM_BASE].SetUint64(3);
+    } else if (use_mrle_sq8) {
+        external_param[vsag::PYRAMID_BASE_QUANTIZATION_TYPE].SetString(
+            vsag::QUANTIZATION_TYPE_VALUE_TQ);
+        external_param[vsag::PYRAMID_PRECISE_QUANTIZATION_TYPE].SetString(
+            vsag::QUANTIZATION_TYPE_VALUE_SQ8);
+        external_param[vsag::INDEX_TQ_CHAIN].SetString("mrle, rabitq");
+        external_param[vsag::INDEX_MRLE_DIM].SetInt(2);
+        external_param[vsag::PYRAMID_BASE_IO_TYPE].SetString("block_memory_io");
+        external_param[vsag::PYRAMID_PRECISE_IO_TYPE].SetString("block_memory_io");
+        external_param[vsag::PYRAMID_RABITQ_BITS_PER_DIM_BASE].SetUint64(3);
     } else if (use_reorder) {
         external_param[vsag::PYRAMID_PRECISE_QUANTIZATION_TYPE].SetString(
             vsag::QUANTIZATION_TYPE_VALUE_FP32);
@@ -686,6 +697,46 @@ TEST_CASE("Pyramid Build stores RaBitQ and SQ8 codes in parallel", "[ut][pyramid
     }
 }
 
+TEST_CASE("Pyramid MRLE RaBitQ3 uses lower-bound candidates with in-memory SQ8",
+          "[ut][pyramid][MRLE][lower_bound]") {
+    constexpr int64_t count = 32;
+    auto test_index = MakePyramidIndex(3, 1, false, false, false, false, false, false, true);
+    std::vector<float> vectors(count * PYRAMID_TEST_DIM);
+    std::vector<int64_t> ids(count);
+    std::vector<std::string> paths(count, "tenant");
+    for (int64_t i = 0; i < count; ++i) {
+        ids[i] = i;
+        for (int64_t d = 0; d < PYRAMID_TEST_DIM; ++d) {
+            vectors[i * PYRAMID_TEST_DIM + d] =
+                static_cast<float>(((i + 3) * (d + 5)) % 37) / 37.0F;
+        }
+    }
+    REQUIRE(
+        test_index.index->Build(MakePyramidDataset(vectors.data(), ids.data(), paths.data(), count))
+            .empty());
+
+    auto query = MakePyramidDataset(vectors.data(), nullptr, paths.data(), 1);
+    const auto baseline =
+        test_index.index->KnnSearch(query,
+                                    1,
+                                    R"({"pyramid":{"ef_search":4,"rabitq_one_bit_search":false}})",
+                                    vsag::FilterPtr{});
+    const auto hybrid = test_index.index->KnnSearch(
+        query, 1, R"({"pyramid":{"ef_search":4,"rabitq_one_bit_search":true}})", vsag::FilterPtr{});
+
+    REQUIRE(baseline->GetIds()[0] == 0);
+    REQUIRE(hybrid->GetIds()[0] == 0);
+    const auto baseline_stats =
+        baseline->GetStatistics({"reorder_lower_bound_probe_count", "reorder_distance_count"});
+    const auto hybrid_stats =
+        hybrid->GetStatistics({"reorder_lower_bound_probe_count", "reorder_distance_count"});
+    REQUIRE(baseline_stats.size() == 2);
+    REQUIRE(hybrid_stats.size() == 2);
+    REQUIRE(std::stoul(baseline_stats[0]) == 0);
+    REQUIRE(std::stoul(hybrid_stats[0]) > 0);
+    REQUIRE(std::stoul(baseline_stats[1]) > 0);
+    REQUIRE(std::stoul(hybrid_stats[1]) > 0);
+}
 TEST_CASE("Pyramid reports statistics for flat and graph leaves", "[ut][pyramid][statistics]") {
     auto test_index = MakePyramidIndex(3, 1, false, false, false, false, true);
     const auto& index = test_index.index;

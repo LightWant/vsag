@@ -780,6 +780,11 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool
+    SupportsDistanceLowerBound() const override {
+        return true;
+    }
+
     [[nodiscard]] MetricType
     GetMetricType() override {
         return this->quantizer_->Metric();

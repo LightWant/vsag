@@ -243,7 +243,7 @@ Pyramid::KnnSearch(const DatasetPtr& query,
     search_param.is_inner_id_allowed = this->create_search_filter(filter);
     const bool collect_rabitq_lower_bounds = search_param.enable_rabitq_one_bit_search and
                                              use_reorder_ and
-                                             base_codes_->SupportSplitCodeStorage();
+                                             base_codes_->SupportsDistanceLowerBound();
     DistanceRecordVector rabitq_lower_bound_candidates(allocator_);
     std::mutex rabitq_lower_bound_mutex;
     SearchFunc search_func = [&](const IndexNode* node, const VisitedListPtr& vl) {
@@ -315,7 +315,7 @@ Pyramid::RangeSearch(const DatasetPtr& query,
     search_param.is_inner_id_allowed = this->create_search_filter(filter);
     const bool collect_rabitq_lower_bounds = search_param.enable_rabitq_one_bit_search and
                                              use_reorder_ and
-                                             base_codes_->SupportSplitCodeStorage();
+                                             base_codes_->SupportsDistanceLowerBound();
     DistanceRecordVector rabitq_lower_bound_candidates(allocator_);
     std::mutex rabitq_lower_bound_mutex;
     SearchFunc search_func = [&](const IndexNode* node, const VisitedListPtr& vl) {

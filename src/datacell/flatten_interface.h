@@ -178,6 +178,11 @@ public:
         return false;
     }
 
+    [[nodiscard]] virtual bool
+    SupportsDistanceLowerBound() const {
+        return false;
+    }
+
     [[nodiscard]] virtual MetricType
     GetMetricType() = 0;
 

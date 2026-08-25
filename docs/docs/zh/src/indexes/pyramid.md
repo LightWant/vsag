@@ -147,6 +147,28 @@ Pyramid 使用 split code 的 code-code 距离完成增量 FLAT→GRAPH 晋升�
 
 `ExportCache` 会保存每个层级、每个节点的 NSW 图种子，`ImportCache` 可在后续 `Build` 中复用。缓存数据使用索引缓存 payload 格式，而非 streaming 索引序列化格式。需要复用缓存的索引通过 footer 序列化前应设置 `persist_source_id: true`，并且两次构建中的每个向量都必须提供唯一的 `Dataset::SourceID`。缓存预热仅适用于 `graph_type: "nsw"`；ODescent、重复 ID 模式、缺少 source ID 或 source ID 重复时会自动回退到普通冷构建。`ef_construction` 不作为缓存路径的准入条件。完整恢复的缓存图行会被保留，缓存未命中的节点则使用当前向量构建。
 
+### MRLE RaBitQ3 与 SQ8 混合重排
+
+若要保持紧凑的 3+8-bit 存储，同时复用 split 搜索的候选策略，可配置 MRLE RaBitQ3 base
+与 SQ8 precise 副本：
+
+```json
+{
+    "base_quantization_type": "tq",
+    "tq_chain": "mrle, rabitq",
+    "mrle_dim": 1280,
+    "rabitq_bits_per_dim_base": 3,
+    "precise_quantization_type": "sq8",
+    "use_reorder": true
+}
+```
+
+Pyramid 使用已存储的 RaBitQ3 编码完成图遍历和 lower-bound 候选补充，再用同一份 SQ8
+precise 副本对合并后的候选重排，不额外存储 RaBitQ5 supplement。内存 SQ8 可设置
+`precise_io_type: "block_memory_io"`；磁盘 SQ8 可选择 `buffer_io` 等后端并设置
+`precise_file_path`。索引编码不变，只有重排读取后端不同。做 A/B 对比时，可在搜索参数中
+将 `rabitq_one_bit_search` 设为 `false` 来关闭候选补充。
+
 ## 检索参数
 
 检索参数放在 `pyramid` 子对象下：
@@ -159,6 +181,7 @@ Pyramid 使用 split code 的 code-code 距离完成增量 FLAT→GRAPH 晋升�
 | `hierarchies` | string[] | `[]` | 指定检索哪个层级。空数组表示使用默认（匿名）层级。 |
 | `hierarchy_op` | string | `"single"` | 多层级结果合并方式：`single`（检索单个层级）、`union`、`intersection`。**注意：** `union` 和 `intersection` 尚未实现——设置后 `KnnSearch`/`RangeSearch` 会返回错误。 |
 | `rabitq_error_rate` | float | `1.9` | 本次搜索使用的正数 lower-bound 误差倍率。默认值 `1.9` 较大；值越大，精度越高，但搜索速度越慢。 |
+| `rabitq_one_bit_search` | bool | 自动 | 在 precise 重排前，使用 RaBitQ lower bound 补充候选。参数名为兼容历史而保留；普通多 bit RaBitQ base 会使用配置的全部 base bits。开启重排且 base 量化器支持 lower bound 时默认启用。 |
 
 ```cpp
 auto result = index->KnnSearch(

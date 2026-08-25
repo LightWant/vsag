@@ -62,13 +62,13 @@ public:
           odescent_param_(pyramid_param->odescent_param),
           index_min_size_(pyramid_param->index_min_size),
           graph_type_(pyramid_param->graph_type),
-          default_rabitq_one_bit_search_(pyramid_param->use_reorder and
-                                         pyramid_param->base_codes_param->name ==
-                                             RABITQ_SPLIT_DATA_CELL),
+          default_rabitq_one_bit_search_(false),
           support_duplicate_(pyramid_param->support_duplicate),
           persist_source_id_(pyramid_param->persist_source_id),
           cache_(std::make_unique<PyramidBuildCache>(common_param.allocator_.get())) {
         base_codes_ = FlattenInterface::MakeInstance(pyramid_param->base_codes_param, common_param);
+        default_rabitq_one_bit_search_ =
+            pyramid_param->use_reorder and base_codes_->SupportsDistanceLowerBound();
         if (pyramid_param->has_hierarchies) {
             for (const auto& h_param : pyramid_param->hierarchies) {
                 auto graph_param = pyramid_param->graph_param;

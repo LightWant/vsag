@@ -518,6 +518,37 @@ TEST_CASE("RaBitQ one-bit split code-code distance", "[ut][RaBitQuantizer]") {
     REQUIRE(std::abs(quantizer.Compute(code1.data(), code2.data()) - distance) <= 1e-6F);
 }
 
+TEST_CASE("Standard RaBitQ3 provides a finite filter lower bound",
+          "[ut][RaBitQuantizer][lower_bound]") {
+    auto allocator = SafeAllocator::FactoryDefaultAllocator();
+    constexpr uint64_t dim = 64;
+    constexpr uint64_t count = 32;
+    auto vectors = fixtures::generate_vectors(count, dim);
+
+    RaBitQuantizer<MetricType::METRIC_TYPE_L2SQR> quantizer(
+        dim, dim, 32, 3, false, false, allocator.get());
+    REQUIRE(quantizer.TrainImpl(vectors.data(), count));
+
+    auto computer = quantizer.FactoryComputer();
+    computer->SetQuery(vectors.data() + 7 * dim);
+    std::vector<uint8_t> code(quantizer.GetCodeSize());
+    REQUIRE(quantizer.EncodeOne(vectors.data(), code.data()));
+
+    float dist = 0.0F;
+    float lower_bound = std::numeric_limits<float>::max();
+    REQUIRE(quantizer.ComputeDistWithLowerBound(*computer, code.data(), &dist, &lower_bound));
+
+    REQUIRE(std::isfinite(dist));
+    REQUIRE(std::isfinite(lower_bound));
+    REQUIRE(lower_bound <= dist);
+
+    float conservative_lower_bound = std::numeric_limits<float>::max();
+    REQUIRE(quantizer.ComputeDistWithLowerBound(
+        *computer, code.data(), &dist, &conservative_lower_bound, 3.8F));
+    REQUIRE(conservative_lower_bound < lower_bound);
+    REQUIRE(std::abs(dist - quantizer.ComputeDist(*computer, code.data())) <= 1e-6F);
+}
+
 TEST_CASE("RaBitQ Split Code Storage", "[ut][RaBitQuantizer]") {
     auto allocator = SafeAllocator::FactoryDefaultAllocator();
     constexpr auto dim = 64;

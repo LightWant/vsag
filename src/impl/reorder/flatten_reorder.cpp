@@ -139,15 +139,24 @@ FlattenReorder::Reorder(const vsag::DistHeapPtr& input,
         }
     }
     const uint64_t heap_unique_size = candidate_size;
+    const bool reorder_supports_lower_bounds = flatten_->SupportsDistanceLowerBound();
     if (heap_unique_size > 0) {
         add_reorder_lower_bound_probe_count(ctx, heap_unique_size);
         ScopedDistancePhase scoped_phase(ctx, DistanceEvaluationPhase::RERANK);
-        flatten_->QueryWithDistanceLowerBound(lower_bound_probe_dists.data(),
-                                              lower_bounds.data(),
-                                              computer,
-                                              all_ids.data(),
-                                              heap_unique_size,
-                                              &ctx);
+        if (reorder_supports_lower_bounds) {
+            flatten_->QueryWithDistanceLowerBound(lower_bound_probe_dists.data(),
+                                                  lower_bounds.data(),
+                                                  computer,
+                                                  all_ids.data(),
+                                                  heap_unique_size,
+                                                  &ctx);
+        } else {
+            flatten_->Query(
+                lower_bound_probe_dists.data(), computer, all_ids.data(), heap_unique_size, &ctx);
+            std::fill(lower_bounds.begin(),
+                      lower_bounds.begin() + heap_unique_size,
+                      std::numeric_limits<float>::max());
+        }
     }
 
     if (rabitq_lower_bound_candidates != nullptr) {
@@ -180,10 +189,15 @@ FlattenReorder::Reorder(const vsag::DistHeapPtr& input,
 
     if (not lower_bounds_available) {
         add_reorder_distance_count(ctx, candidate_size);
-        {
+        const uint64_t exact_offset = reorder_supports_lower_bounds ? 0 : heap_unique_size;
+        const uint64_t exact_count = candidate_size - exact_offset;
+        if (exact_count > 0) {
             ScopedDistancePhase scoped(ctx, DistanceEvaluationPhase::RERANK);
-            flatten_->Query(
-                lower_bound_probe_dists.data(), computer, all_ids.data(), candidate_size, &ctx);
+            flatten_->Query(lower_bound_probe_dists.data() + exact_offset,
+                            computer,
+                            all_ids.data() + exact_offset,
+                            exact_count,
+                            &ctx);
         }
         for (uint64_t i = 0; i < candidate_size; ++i) {
             if (ctx.reasoning_ctx != nullptr) {

@@ -153,6 +153,29 @@ reduce recall unless the embedding model was trained for prefix dimensions.
 
 `ExportCache` captures per-hierarchy, per-node NSW graph seeds and `ImportCache` makes them available to a later `Build`. Cache data uses the index cache payload format, not the streaming index serialization format. Set `persist_source_id: true` before footer-serializing an index whose cache will be reused, and provide a unique `Dataset::SourceID` for every vector in both builds. Cache warm builds apply only to `graph_type: "nsw"`; ODescent, duplicate-ID mode, missing source IDs, and duplicate source IDs automatically fall back to a normal cold build. `ef_construction` is not an eligibility condition for the cache path. Fully restored cached graph rows are retained, while cache misses are constructed from the current vectors.
 
+### MRLE RaBitQ3 with SQ8 hybrid reorder
+
+To keep the compact 3+8-bit layout while reusing the split-search candidate strategy, configure an
+MRLE RaBitQ3 base and an SQ8 precise copy:
+
+```json
+{
+    "base_quantization_type": "tq",
+    "tq_chain": "mrle, rabitq",
+    "mrle_dim": 1280,
+    "rabitq_bits_per_dim_base": 3,
+    "precise_quantization_type": "sq8",
+    "use_reorder": true
+}
+```
+
+Pyramid uses the stored RaBitQ3 code both for graph traversal and for lower-bound candidate
+supplementation, then reranks the merged candidates with the same SQ8 precise copy. No RaBitQ5
+supplement is stored. Set `precise_io_type` to `block_memory_io` for in-memory SQ8, or to a
+disk-backed backend such as `buffer_io` together with `precise_file_path`; the index encoding is
+unchanged, but reorder uses the selected IO backend. Set `rabitq_one_bit_search` to `false` in the
+search parameters to disable candidate supplementation for an A/B comparison.
+
 ## Search parameters
 
 Search-time parameters live under the `pyramid` sub-object:
@@ -165,6 +188,7 @@ Search-time parameters live under the `pyramid` sub-object:
 | `hierarchies` | string[] | `[]` | Select which hierarchy to search. Empty means use the default (unnamed) hierarchy. |
 | `hierarchy_op` | string | `"single"` | How to combine results across hierarchies: `single` (search one hierarchy), `union`, or `intersection`. **Note:** `union` and `intersection` are not yet implemented — setting them will cause `KnnSearch`/`RangeSearch` to return an error. |
 | `rabitq_error_rate` | float | `1.9` | Positive lower-bound error multiplier for this search. The default `1.9` is relatively large; increasing it improves accuracy but slows down search. |
+| `rabitq_one_bit_search` | bool | auto | Collect additional candidates using RaBitQ lower bounds before precise reorder. The compatibility name is retained; a standard multi-bit RaBitQ base uses all configured base bits. The automatic default is enabled when reorder is on and the base quantizer supports lower bounds. |
 
 ```cpp
 auto result = index->KnnSearch(

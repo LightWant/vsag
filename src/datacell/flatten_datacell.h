@@ -55,6 +55,17 @@ public:
         this->query(result_dists, comp, idx, id_count, ctx);
     }
 
+    void
+    QueryWithDistanceLowerBound(float* result_dists,
+                                float* lower_bounds,
+                                const ComputerInterfacePtr& computer,
+                                const InnerIdType* idx,
+                                InnerIdType id_count,
+                                QueryContext* ctx = nullptr) override {
+        auto comp = static_cast<Computer<QuantTmpl>*>(computer.get());
+        this->query_with_distance_lower_bound(result_dists, lower_bounds, comp, idx, id_count, ctx);
+    }
+
     ComputerInterfacePtr
     FactoryComputer(const void* query) override {
         return this->factory_computer(static_cast<const float*>(query));
@@ -129,6 +140,11 @@ public:
 
     [[nodiscard]] std::string
     GetQuantizerName() override;
+
+    [[nodiscard]] bool
+    SupportsDistanceLowerBound() const override {
+        return quantizer_->SupportsDistanceLowerBound();
+    }
 
     [[nodiscard]] MetricType
     GetMetricType() override;
@@ -217,6 +233,14 @@ private:
           const InnerIdType* idx,
           InnerIdType id_count,
           QueryContext* ctx);
+
+    void
+    query_with_distance_lower_bound(float* result_dists,
+                                    float* lower_bounds,
+                                    Computer<QuantTmpl>* computer,
+                                    const InnerIdType* idx,
+                                    InnerIdType id_count,
+                                    QueryContext* ctx);
 
     ComputerInterfacePtr
     factory_computer(const float* query) {
@@ -439,6 +463,80 @@ FlattenDataCell<QuantTmpl, LayoutTmpl>::query(float* result_dists,
         ctx->stats->AddDistance(ctx->distance_phase, backend_, static_cast<uint64_t>(id_count));
 }
 
+template <typename QuantTmpl, typename LayoutTmpl>
+void
+FlattenDataCell<QuantTmpl, LayoutTmpl>::query_with_distance_lower_bound(
+    float* result_dists,
+    float* lower_bounds,
+    Computer<QuantTmpl>* computer,
+    const InnerIdType* idx,
+    InnerIdType id_count,
+    QueryContext* ctx) {
+    if (lower_bounds == nullptr) {
+        this->query(result_dists, computer, idx, id_count, ctx);
+        return;
+    }
+
+    std::fill(lower_bounds, lower_bounds + id_count, std::numeric_limits<float>::max());
+    Allocator* search_alloc = select_query_allocator(ctx, allocator_);
+    if constexpr (not LayoutTmpl::InMemory) {
+        if (id_count > 1) {
+            ByteBuffer codes(static_cast<uint64_t>(id_count) * code_size_, search_alloc);
+            double io_cost_ms = 0.0F;
+            {
+                Timer timer(io_cost_ms);
+                this->layout_->MultiRead(idx, id_count, codes.data, search_alloc);
+            }
+            if (ctx != nullptr and ctx->stats != nullptr) {
+                ctx->stats->io_cnt.fetch_add(id_count, std::memory_order_relaxed);
+                ctx->stats->io_time_ms.fetch_add(static_cast<uint32_t>(io_cost_ms),
+                                                 std::memory_order_relaxed);
+            }
+            for (uint64_t i = 0; i < id_count; ++i) {
+                quantizer_->ComputeDistWithLowerBound(*computer,
+                                                      codes.data + i * code_size_,
+                                                      result_dists + i,
+                                                      lower_bounds + i,
+                                                      ctx == nullptr
+                                                          ? std::numeric_limits<float>::quiet_NaN()
+                                                          : ctx->rabitq_error_rate);
+            }
+            if (ctx != nullptr and ctx->stats != nullptr && ctx->track_distance_evaluations) {
+                ctx->stats->AddDistance(ctx->distance_phase, backend_, id_count);
+            }
+            return;
+        }
+    }
+
+    for (uint64_t i = 0; i < id_count; ++i) {
+        bool need_release = false;
+        const auto* codes = this->GetCodesById(idx[i], need_release);
+        try {
+            quantizer_->ComputeDistWithLowerBound(
+                *computer,
+                codes,
+                result_dists + i,
+                lower_bounds + i,
+                ctx == nullptr ? std::numeric_limits<float>::quiet_NaN() : ctx->rabitq_error_rate);
+        } catch (...) {
+            if (need_release and codes != nullptr) {
+                this->layout_->Release(codes);
+            }
+            throw;
+        }
+        if (need_release and codes != nullptr) {
+            this->layout_->Release(codes);
+        }
+    }
+    if constexpr (not LayoutTmpl::InMemory) {
+        if (ctx != nullptr and ctx->stats != nullptr) {
+            ctx->stats->io_cnt.fetch_add(id_count, std::memory_order_relaxed);
+        }
+    }
+    if (ctx != nullptr and ctx->stats != nullptr and ctx->track_distance_evaluations) {
+        ctx->stats->AddDistance(ctx->distance_phase, backend_, id_count);
+    }
+}
 template <typename QuantTmpl, typename LayoutTmpl>
 float
 FlattenDataCell<QuantTmpl, LayoutTmpl>::ComputePairVectors(InnerIdType id1, InnerIdType id2) {

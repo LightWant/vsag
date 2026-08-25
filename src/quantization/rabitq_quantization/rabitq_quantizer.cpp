@@ -1378,6 +1378,62 @@ RaBitQuantizer<metric>::ComputeDistWithOneBitLowerBound(Computer<RaBitQuantizer>
 }
 
 template <MetricType metric>
+bool
+RaBitQuantizer<metric>::ComputeDistWithLowerBoundImpl(Computer<RaBitQuantizer>& computer,
+                                                      const uint8_t* codes,
+                                                      float* dist,
+                                                      float* lower_bound,
+                                                      float runtime_rabitq_error_rate) const {
+    this->ComputeDistImpl(computer, codes, dist);
+    if (lower_bound != nullptr) {
+        *lower_bound = std::numeric_limits<float>::max();
+    }
+    if (num_bits_per_dim_query_ != 32 or not std::isfinite(*dist)) {
+        return false;
+    }
+
+    const error_type quantization_error =
+        std::fabs(*reinterpret_cast<const error_type*>(codes + offset_error_));
+    if (quantization_error <= 1e-5F) {
+        return false;
+    }
+    if (lower_bound == nullptr) {
+        return true;
+    }
+
+    const auto* query = computer.buf_;
+    const norm_type query_norm = *reinterpret_cast<const norm_type*>(query + query_offset_norm_);
+    const norm_type base_norm = *reinterpret_cast<const norm_type*>(codes + offset_norm_);
+    const float safe_error = std::clamp(quantization_error, 1e-5F, 1.0F);
+    const error_type lower_bound_error =
+        std::sqrt(std::max(0.0F, 1.0F - safe_error * safe_error) /
+                  std::max(1.0F, static_cast<float>(this->dim_ - 1)));
+    const float effective_error_rate =
+        std::isfinite(runtime_rabitq_error_rate) and runtime_rabitq_error_rate > 0.0F
+            ? runtime_rabitq_error_rate
+            : rabitq_error_rate_;
+    float error_term = 2.0F * base_norm * query_norm * effective_error_rate * lower_bound_error /
+                       quantization_error;
+    if constexpr (metric == MetricType::METRIC_TYPE_COSINE) {
+        const norm_type query_raw_norm =
+            *reinterpret_cast<const norm_type*>(query + query_offset_raw_norm_);
+        const norm_type base_raw_norm =
+            *reinterpret_cast<const norm_type*>(codes + offset_raw_norm_);
+        if (not is_approx_zero(query_raw_norm) and not is_approx_zero(base_raw_norm)) {
+            error_term *= 0.5F / (query_raw_norm * base_raw_norm);
+        }
+    }
+    if constexpr (metric == MetricType::METRIC_TYPE_IP) {
+        error_term *= 0.5F;
+    }
+
+    const float value = *dist - error_term;
+    if (std::isfinite(value)) {
+        *lower_bound = value - 1e-5F * std::max(1.0F, std::fabs(value));
+    }
+    return true;
+}
+template <MetricType metric>
 void
 RaBitQuantizer<metric>::ComputeDistsWithOneBitLowerBoundBatch4(
     Computer<RaBitQuantizer>& computer,

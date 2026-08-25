@@ -205,18 +205,30 @@ public:
     }
 
     inline bool
-    ComputeDistWithLowerBound(Computer<QuantT>& computer,
-                              const uint8_t* codes,
-                              float* dists,
-                              float* lower_bound) const {
+    ComputeDistWithLowerBound(
+        Computer<QuantT>& computer,
+        const uint8_t* codes,
+        float* dists,
+        float* lower_bound,
+        float runtime_rabitq_error_rate = std::numeric_limits<float>::quiet_NaN()) const {
         if constexpr (has_ComputeDistWithLowerBoundImpl<QuantT>::value) {
-            return cast().ComputeDistWithLowerBoundImpl(computer, codes, dists, lower_bound);
+            return cast().ComputeDistWithLowerBoundImpl(
+                computer, codes, dists, lower_bound, runtime_rabitq_error_rate);
         } else {
             cast().ComputeDistImpl(computer, codes, dists);
             if (lower_bound != nullptr) {
                 *lower_bound = std::numeric_limits<float>::max();
             }
             return false;
+        }
+    }
+
+    [[nodiscard]] bool
+    SupportsDistanceLowerBound() const {
+        if constexpr (has_SupportsDistanceLowerBoundImpl<QuantT>::value) {
+            return cast().SupportsDistanceLowerBoundImpl();
+        } else {
+            return has_ComputeDistWithLowerBoundImpl<QuantT>::value;
         }
     }
 
@@ -387,6 +399,7 @@ private:
                                  std::declval<const uint8_t*>(),
                                  std::declval<float*>(),
                                  std::declval<float*>())
+    GENERATE_HAS_MEMBER_FUNCTION(SupportsDistanceLowerBoundImpl, bool)
 };
 
 #define TEMPLATE_QUANTIZER(Name)                        \

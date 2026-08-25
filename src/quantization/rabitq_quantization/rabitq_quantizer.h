@@ -207,6 +207,14 @@ public:
                               const uint8_t* scalar_code,
                               float* dist) const;
 
+    bool
+    ComputeDistWithLowerBoundImpl(
+        Computer<RaBitQuantizer>& computer,
+        const uint8_t* codes,
+        float* dist,
+        float* lower_bound,
+        float runtime_rabitq_error_rate = std::numeric_limits<float>::quiet_NaN()) const;
+
     [[nodiscard]] float
     ComputeScalarCodesDistance(const uint8_t* scalar_code1,
                                uint64_t code_sum1,
