@@ -76,6 +76,24 @@ class RaBitQSplitDataCellInterface;
  * Supports quantized codes, reorder, attribute filtering, cache warm-start,
  * force remove, and iterative search. Introduced since v0.12.
  */
+/// One row of a batched MCI update: the row to update plus its query source. Exactly one source is
+/// set - a ready vector pointer, a precomputed candidate list, or the row's stored codes to decode.
+struct MciUpdateRow {
+    InnerIdType inner_id{0};
+    const void* vector{nullptr};
+    const Vector<InnerIdType>* knn{nullptr};
+    bool decode_codes{false};
+    /// Candidate bound: 0 keeps Add's insertion prefix (inner_id + 1), a value applies to every row
+    /// (delete repair passes the whole live graph).
+    uint64_t visible_total{0};
+};
+
+/// Outcome of one plan merge pass, logged by the callers.
+struct MCIPlanMergeStats {
+    uint64_t fallbacks{0};
+    uint64_t skipped_covered{0};
+};
+
 class HGraph : public InnerIndexInterface {
 public:
     static ParamPtr
@@ -1069,6 +1087,37 @@ private:
     void
     parallel_incremental_mci_add(const AddBatch& batch, const DatasetPtr& data);
 
+    /// Planned batched MCI update shared by Add and delete repair: plan chunks of rows against a
+    /// frozen read view, then commit them in inner-ID order. compact_after_chunk keeps Add's
+    /// per-chunk flush point; repair compacts once after the whole set instead.
+    MCIPlanMergeStats
+    parallel_incremental_mci_update(const Vector<MciUpdateRow>& rows,
+                                    uint64_t min_memberships_to_skip,
+                                    bool compact_after_chunk);
+
+    /// True when a repair row can be updated straight from its stored FP32 codes.
+    [[nodiscard]] bool
+    mci_repair_uses_fp32_pipeline() const;
+
+    /// Nearest live candidates for a repair row by stored-code distance. O(total) scratch for
+    /// quantized indexes, which is why those rows stay on the serial path.
+    void
+    collect_mci_repair_knn(InnerIdType node_id, Vector<InnerIdType>& knn_ids) const;
+
+    /// Decode a repair row's stored codes into `out` (non-contiguous FP32 storage).
+    void
+    decode_mci_repair_codes(InnerIdType node_id, Vector<float>& out) const;
+
+    /// Build the batched-update rows for a delete repair set.
+    void
+    build_mci_repair_rows(const Vector<InnerIdType>& repair_node_ids,
+                          Vector<MciUpdateRow>& rows) const;
+
+    /// Repair an explicit set of live inner IDs, in parallel when the index and the batch allow it.
+    /// Returns the number of rows that were actually repaired.
+    uint64_t
+    repair_mci_cliques(const Vector<InnerIdType>& repair_node_ids);
+
     /// Plan one row of an Add batch against a frozen read view. Caller owns view and plan and must
     /// not hold any CliqueDataCell write lock. Plans are not applied here.
     void
@@ -1129,13 +1178,14 @@ private:
                             uint64_t visible_total,
                             const std::function<void(const Vector<InnerIdType>&)>& emit);
 
-    /// Apply the first plan_count plans of one chunk in inner-ID order. Returns the number of rows
-    /// that needed the serial repair fallback, which is logged by the caller. Caller holds
-    /// mci_mutation_mutex_.
-    uint64_t
+    /// Apply the first plan_count plans of one chunk in inner-ID order. min_memberships_to_skip
+    /// re-checks live coverage in row order before committing a row, which is the serial delete
+    /// repair guard; zero keeps the Add semantics. Caller holds mci_mutation_mutex_.
+    MCIPlanMergeStats
     merge_incremental_mci_clique_plans(Vector<MciAddPlan>& plans,
                                        uint64_t plan_count,
-                                       uint64_t total);
+                                       uint64_t total,
+                                       uint64_t min_memberships_to_skip = 0);
 
     /// Search HGraph KNN and update MCI without inserting a vector into HGraph.
     /// visible_total is the exclusive inner-ID bound for accepted KNN candidates, not live count.
